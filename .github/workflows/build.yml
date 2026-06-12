@@ -26,7 +26,7 @@ jobs:
           - { name: 'luci-app-themeswitch', slug: 'peditx/luci-app-themeswitch' }
 
     steps:
-      - name: Checkout Target Repository
+      - name: Checkout Target Repository (Where builds will be saved)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -41,69 +41,87 @@ jobs:
       - name: Extract Project Version
         id: get_version
         run: |
-          VERSION=$(grep 'PKG_VERSION:=' src_project/Makefile | cut -d'=' -f2 | tr -d ' \n\r')
+          # Robust version extraction from Makefile
+          VERSION=$(grep -E 'PKG_VERSION\s*:=\s*' src_project/Makefile | sed -E 's/PKG_VERSION\s*:=\s*//' | tr -d ' \n\r')
           if [ -z "$VERSION" ]; then
-            VERSION="latest"
+            VERSION="1.0.0"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Project Version discovered: $VERSION"
 
-      # --- Environment Setup ---
-      - name: Initialization Environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison gawk gettext git libncurses5-dev libssl-dev rsync zlib1g-dev swig unzip wget
+          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext unzip zlib1g-dev file python3 python3-venv curl wget zstd
 
-      # --- IPK Compilation (OpenWrt 24.10) ---
-      - name: Download OpenWrt SDK for IPK (24.10)
+      # --- IPK Build Environment (OpenWrt <= 24.10 using stable 23.05 SDK) ---
+      - name: Setup OpenWrt 23.05 SDK (for IPK)
         run: |
-          wget https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-14.2.0_musl.Linux-x86_64.tar.xz
-          tar -xJf openwrt-sdk-*.tar.xz
-          mv openwrt-sdk-* sdk_ipk
-
-      - name: Compile IPK Package
-        run: |
+          wget https://downloads.openwrt.org/releases/23.05.0/targets/x86/64/openwrt-sdk-23.05.0-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+          mkdir sdk_ipk && tar -xJf openwrt-sdk-23.05.0-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz -C sdk_ipk --strip-components=1
           cd sdk_ipk
-          mkdir -p package/${{ matrix.project.name }}
-          cp -r ../src_project/* package/${{ matrix.project.name }}/
+          echo "src-git packages https://github.com/openwrt/packages.git" > feeds.conf.default
+          echo "src-git luci https://github.com/openwrt/luci.git" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          make defconfig
-          make package/${{ matrix.project.name }}/compile V=s
 
-      # --- APK Compilation (OpenWrt 25.12) ---
-      - name: Download OpenWrt SDK for APK (25.12 Snapshot)
+      - name: Build IPK Package
         run: |
-          wget https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz || \
-          wget https://downloads.openwrt.org/releases/25.12.0/targets/x86/64/openwrt-sdk-25.12.0-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz
-          tar -xJf openwrt-sdk-*.tar.xz
-          mv openwrt-sdk-* sdk_apk
+          cd sdk_ipk
+          # Clone/Copy source inside the package directory
+          mkdir -p package/${{ matrix.project.name }}
+          cp -r ../src_project/* package/${{ matrix.project.name }}/
+          
+          # Inject configuration settings to disable Javascript/CSS compression
+          echo "CONFIG_PACKAGE_${{ matrix.project.name }}=m" >> .config
+          echo "CONFIG_LUCI_JSMIN=n" >> .config
+          echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          
+          make defconfig
+          make package/${{ matrix.project.name }}/compile -j$(nproc) V=s
 
-      - name: Compile APK Package
+      # --- APK Build Environment (OpenWrt >= 25.12 using stable 25.12.0 SDK) ---
+      - name: Setup OpenWrt 25.12 SDK (for APK)
+        run: |
+          wget https://downloads.openwrt.org/releases/25.12.0/targets/x86/64/openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          zstd -d openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          mkdir sdk_apk && tar -xf openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar -C sdk_apk --strip-components=1
+          cd sdk_apk
+          echo "src-git packages https://github.com/openwrt/packages.git" > feeds.conf.default
+          echo "src-git luci https://github.com/openwrt/luci.git" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Build APK Package
         run: |
           cd sdk_apk
           mkdir -p package/${{ matrix.project.name }}
           cp -r ../src_project/* package/${{ matrix.project.name }}/
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          
+          # Inject configuration settings to disable Javascript/CSS compression
+          echo "CONFIG_PACKAGE_${{ matrix.project.name }}=m" >> .config
+          echo "CONFIG_LUCI_JSMIN=n" >> .config
+          echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          
           make defconfig
-          make package/${{ matrix.project.name }}/compile V=s
+          make package/${{ matrix.project.name }}/compile -j$(nproc) V=s
 
-      # --- Organize Outputs into Target Directories ---
+      # --- Organize and Structure Output Folders ---
       - name: Organize Binaries
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
-          TARGET_DIR="target_repo/${{ matrix.project.name }}/$VERSION"
+          TARGET_DIR="target_repo/${{ matrix.project.name }}/v$VERSION"
           
           mkdir -p "$TARGET_DIR/ipk"
           mkdir -p "$TARGET_DIR/apk"
           
+          # Copy IPK artifacts
           find sdk_ipk/bin/ -name "*${{ matrix.project.name }}*.ipk" -exec cp {} "$TARGET_DIR/ipk/" \; 2>/dev/null || true
+          
+          # Copy APK artifacts
           find sdk_apk/bin/ -name "*${{ matrix.project.name }}*.apk" -exec cp {} "$TARGET_DIR/apk/" \; 2>/dev/null || true
 
-      # --- Commit and Push Changes to Target Repository ---
+      # --- Commit & Deploy to Target Repository ---
       - name: Deploy to Target Repository
         run: |
           cd target_repo
@@ -113,8 +131,8 @@ jobs:
           git add .
           
           if ! git diff-index --quiet HEAD; then
-            git commit -m "Automated build: ${{ matrix.project.name }} v${{ steps.get_version.outputs.version }}"
+            git commit -m "Automated compile: ${{ matrix.project.name }} v${{ steps.get_version.outputs.version }}"
             git push origin main
           else
-            echo "No changes detected. Skipping commit."
+            echo "No changes to deploy. Skipping push."
           fi
