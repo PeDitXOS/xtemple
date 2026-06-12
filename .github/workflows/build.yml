@@ -6,12 +6,11 @@ on:
       - main
   workflow_dispatch:
 
-# Grant write permissions to the default GITHUB_TOKEN so it can push changes
 permissions:
   contents: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Solves the Node.js 20 deprecation warning
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -19,24 +18,24 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: false # Prevents one project failure from canceling the others
+      fail-fast: false
       matrix:
         project:
-          - { name: 'luci-theme-peditx', url: 'https://github.com/peditx/luci-theme-peditx' }
-          - { name: 'luci-theme-carbonpx', url: 'https://github.com/peditx/luci-theme-carbonpx' }
-          - { name: 'luci-app-themeswitch', url: 'https://github.com/peditx/luci-app-themeswitch' }
+          - { name: 'luci-theme-peditx', slug: 'peditx/luci-theme-peditx' }
+          - { name: 'luci-theme-carbonpx', slug: 'peditx/luci-theme-carbonpx' }
+          - { name: 'luci-app-themeswitch', slug: 'peditx/luci-app-themeswitch' }
 
     steps:
       - name: Checkout Target Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }} # Using default token with write permissions
+          token: ${{ secrets.GITHUB_TOKEN }}
           path: 'target_repo'
 
       - name: Checkout Source Project
         uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.project.url }}
+          repository: ${{ matrix.project.slug }}
           path: 'src_project'
 
       - name: Extract Project Version
@@ -49,14 +48,15 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Project Version discovered: $VERSION"
 
-      # --- IPK Compilation (OpenWrt 24.10 & older) ---
-      - name: Initialization Environment for IPK
+      # --- Environment Setup ---
+      - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison gawk gettext git libncurses5-dev libssl-dev rsync zlib1g-dev swig unzip wget
 
+      # --- IPK Compilation (OpenWrt 24.10) ---
       - name: Download OpenWrt SDK for IPK (24.10)
         run: |
           wget https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-14.2.0_musl.Linux-x86_64.tar.xz
@@ -73,11 +73,11 @@ jobs:
           make defconfig
           make package/${{ matrix.project.name }}/compile V=s
 
-      # --- APK Compilation (OpenWrt 25.12 & newer) ---
-      - name: Download OpenWrt SDK for APK (25.12)
+      # --- APK Compilation (OpenWrt 25.12) ---
+      - name: Download OpenWrt SDK for APK (25.12 Snapshot)
         run: |
-          wget https://downloads.openwrt.org/releases/25.12.0/targets/x86/64/openwrt-sdk-25.12.0-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz || \
-          wget https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz
+          wget https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz || \
+          wget https://downloads.openwrt.org/releases/25.12.0/targets/x86/64/openwrt-sdk-25.12.0-x86-64_gcc-15.1.0_musl.Linux-x86_64.tar.xz
           tar -xJf openwrt-sdk-*.tar.xz
           mv openwrt-sdk-* sdk_apk
 
@@ -100,8 +100,8 @@ jobs:
           mkdir -p "$TARGET_DIR/ipk"
           mkdir -p "$TARGET_DIR/apk"
           
-          find sdk_ipk/bin/ -name "*.ipk" -exec cp {} "$TARGET_DIR/ipk/" \; 2>/dev/null || true
-          find sdk_apk/bin/ -name "*.apk" -exec cp {} "$TARGET_DIR/apk/" \; 2>/dev/null || true
+          find sdk_ipk/bin/ -name "*${{ matrix.project.name }}*.ipk" -exec cp {} "$TARGET_DIR/ipk/" \; 2>/dev/null || true
+          find sdk_apk/bin/ -name "*${{ matrix.project.name }}*.apk" -exec cp {} "$TARGET_DIR/apk/" \; 2>/dev/null || true
 
       # --- Commit and Push Changes to Target Repository ---
       - name: Deploy to Target Repository
