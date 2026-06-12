@@ -17,14 +17,6 @@ jobs:
     name: Compile Packages
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        project:
-          - { name: 'luci-theme-peditx', slug: 'peditx/luci-theme-peditx' }
-          - { name: 'luci-theme-carbonpx', slug: 'peditx/luci-theme-carbonpx' }
-          - { name: 'luci-app-themeswitch', slug: 'peditx/luci-app-themeswitch' }
-
     steps:
       - name: Checkout Target Repository (Where builds will be saved)
         uses: actions/checkout@v4
@@ -32,22 +24,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           path: 'target_repo'
 
-      - name: Checkout Source Project
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ matrix.project.slug }}
-          path: 'src_project'
-
-      - name: Extract Project Version
-        id: get_version
+      - name: Clone Source Projects
         run: |
-          # Robust version extraction from Makefile
-          VERSION=$(grep -E 'PKG_VERSION\s*:=\s*' src_project/Makefile | sed -E 's/PKG_VERSION\s*:=\s*//' | tr -d ' \n\r')
-          if [ -z "$VERSION" ]; then
-            VERSION="1.0.0"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Project Version discovered: $VERSION"
+          mkdir -p src_projects
+          git clone https://github.com/peditx/luci-theme-peditx.git src_projects/luci-theme-peditx
+          git clone https://github.com/peditx/luci-theme-carbonpx.git src_projects/luci-theme-carbonpx
+          git clone https://github.com/peditx/luci-app-themeswitch.git src_projects/luci-app-themeswitch
 
       - name: Install Dependencies
         run: |
@@ -60,25 +42,31 @@ jobs:
           wget https://downloads.openwrt.org/releases/23.05.0/targets/x86/64/openwrt-sdk-23.05.0-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
           mkdir sdk_ipk && tar -xJf openwrt-sdk-23.05.0-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz -C sdk_ipk --strip-components=1
           cd sdk_ipk
-          echo "src-git packages https://github.com/openwrt/packages.git" > feeds.conf.default
-          echo "src-git luci https://github.com/openwrt/luci.git" >> feeds.conf.default
+          # Using built-in feed definitions ensuring correct matched branches
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build IPK Package
+      - name: Build IPK Packages
         run: |
           cd sdk_ipk
-          # Clone/Copy source inside the package directory
-          mkdir -p package/${{ matrix.project.name }}
-          cp -r ../src_project/* package/${{ matrix.project.name }}/
+          projects=("luci-theme-peditx" "luci-theme-carbonpx" "luci-app-themeswitch")
           
-          # Inject configuration settings to disable Javascript/CSS compression
-          echo "CONFIG_PACKAGE_${{ matrix.project.name }}=m" >> .config
-          echo "CONFIG_LUCI_JSMIN=n" >> .config
-          echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          for proj in "${projects[@]}"; do
+            echo "==== Building IPK for $proj ===="
+            mkdir -p package/$proj
+            cp -r ../src_projects/$proj/* package/$proj/
+            
+            # Append local config variables to .config
+            echo "CONFIG_PACKAGE_$proj=m" >> .config
+            echo "CONFIG_LUCI_JSMIN=n" >> .config
+            echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          done
           
           make defconfig
-          make package/${{ matrix.project.name }}/compile -j$(nproc) V=s
+          
+          for proj in "${projects[@]}"; do
+            make package/$proj/compile -j$(nproc) V=s || make package/$proj/compile V=sc
+          done
 
       # --- APK Build Environment (OpenWrt >= 25.12 using stable 25.12.0 SDK) ---
       - name: Setup OpenWrt 25.12 SDK (for APK)
@@ -87,39 +75,51 @@ jobs:
           zstd -d openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           mkdir sdk_apk && tar -xf openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar -C sdk_apk --strip-components=1
           cd sdk_apk
-          echo "src-git packages https://github.com/openwrt/packages.git" > feeds.conf.default
-          echo "src-git luci https://github.com/openwrt/luci.git" >> feeds.conf.default
+          # Using built-in feed definitions ensuring correct matched branches
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Build APK Package
+      - name: Build APK Packages
         run: |
           cd sdk_apk
-          mkdir -p package/${{ matrix.project.name }}
-          cp -r ../src_project/* package/${{ matrix.project.name }}/
+          projects=("luci-theme-peditx" "luci-theme-carbonpx" "luci-app-themeswitch")
           
-          # Inject configuration settings to disable Javascript/CSS compression
-          echo "CONFIG_PACKAGE_${{ matrix.project.name }}=m" >> .config
-          echo "CONFIG_LUCI_JSMIN=n" >> .config
-          echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          for proj in "${projects[@]}"; do
+            echo "==== Building APK for $proj ===="
+            mkdir -p package/$proj
+            cp -r ../src_projects/$proj/* package/$proj/
+            
+            # Append local config variables to .config
+            echo "CONFIG_PACKAGE_$proj=m" >> .config
+            echo "CONFIG_LUCI_JSMIN=n" >> .config
+            echo "CONFIG_LUCI_CSSTIDY=n" >> .config
+          done
           
           make defconfig
-          make package/${{ matrix.project.name }}/compile -j$(nproc) V=s
+          
+          for proj in "${projects[@]}"; do
+            make package/$proj/compile -j$(nproc) V=s || make package/$proj/compile V=sc
+          done
 
       # --- Organize and Structure Output Folders ---
       - name: Organize Binaries
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
-          TARGET_DIR="target_repo/${{ matrix.project.name }}/v$VERSION"
+          projects=("luci-theme-peditx" "luci-theme-carbonpx" "luci-app-themeswitch")
           
-          mkdir -p "$TARGET_DIR/ipk"
-          mkdir -p "$TARGET_DIR/apk"
-          
-          # Copy IPK artifacts
-          find sdk_ipk/bin/ -name "*${{ matrix.project.name }}*.ipk" -exec cp {} "$TARGET_DIR/ipk/" \; 2>/dev/null || true
-          
-          # Copy APK artifacts
-          find sdk_apk/bin/ -name "*${{ matrix.project.name }}*.apk" -exec cp {} "$TARGET_DIR/apk/" \; 2>/dev/null || true
+          for proj in "${projects[@]}"; do
+            VERSION=$(grep -E 'PKG_VERSION\s*:=\s*' src_projects/$proj/Makefile | sed -E 's/PKG_VERSION\s*:=\s*//' | tr -d ' \n\r')
+            if [ -z "$VERSION" ]; then
+              VERSION="1.0.0"
+            fi
+            
+            TARGET_DIR="target_repo/$proj/v$VERSION"
+            mkdir -p "$TARGET_DIR/ipk"
+            mkdir -p "$TARGET_DIR/apk"
+            
+            # Copy matching packages from respective builds
+            find sdk_ipk/bin/ -name "*$proj*.ipk" -exec cp {} "$TARGET_DIR/ipk/" \; 2>/dev/null || true
+            find sdk_apk/bin/ -name "*$proj*.apk" -exec cp {} "$TARGET_DIR/apk/" \; 2>/dev/null || true
+          done
 
       # --- Commit & Deploy to Target Repository ---
       - name: Deploy to Target Repository
@@ -131,7 +131,7 @@ jobs:
           git add .
           
           if ! git diff-index --quiet HEAD; then
-            git commit -m "Automated compile: ${{ matrix.project.name }} v${{ steps.get_version.outputs.version }}"
+            git commit -m "Automated compile: All Packages"
             git push origin main
           else
             echo "No changes to deploy. Skipping push."
